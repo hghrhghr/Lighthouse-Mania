@@ -1,52 +1,41 @@
-import os
-import pandas as pd
 import streamlit as st
+import pandas as pd
 import folium
 from streamlit_folium import st_folium
+from st_gsheets_connection import GSheetsConnection
 
 # --- ページ基本設定 ---
 st.set_page_config(page_title="日本全国 灯台マップ", layout="wide")
 
 st.title("⚓ 日本全国 灯台位置可視化アプリ")
-st.caption("日本の灯台の位置・レンズの種類・訪問ステータス・スコア評価を可視化・管理できます。")
+st.caption("Googleスプレッドシート連携版：日本の灯台の位置・レンズ・訪問ステータス・スコアを自動同期します。")
 
-CSV_FILE = "lighthouses.csv"
+# --- スプレッドシート接続 ---
+conn = st.connection("gsheets", type=GSheetsConnection)
 
-# --- データ読み込み＆保存関数 ---
 def load_data():
-    if not os.path.exists(CSV_FILE):
-        df_init = pd.DataFrame(columns=["name", "region", "pref", "lat", "lon", "height", "range_nm", "lens", "visited", "score", "desc"])
-        df_init.to_csv(CSV_FILE, index=False, encoding="utf-8-sig")
-        return df_init
+    # ttl=0 で常に最新のスプレッドシートデータを読み込む
+    df = conn.read(ttl=0)
     
-    df = pd.read_csv(CSV_FILE)
-    
-    # 欠損値・新規列の補完処理
-    if "lens" not in df.columns:
-        df["lens"] = "不明"
-    else:
-        df["lens"] = df["lens"].fillna("不明")
-        
-    if "visited" not in df.columns:
-        df["visited"] = "未訪問"
-    else:
-        df["visited"] = df["visited"].fillna("未訪問")
-
-    # ★追加：スコア列の補完
-    if "score" not in df.columns:
-        df["score"] = 0
-    else:
-        df["score"] = df["score"].fillna(0).astype(int)
-        
+    # 必須カラム・型変換の保護処理
+    cols = ["name", "region", "pref", "lat", "lon", "height", "range_nm", "lens", "visited", "score", "desc"]
+    for c in cols:
+        if c not in df.columns:
+            df[c] = ""
+            
+    df["lat"] = pd.to_numeric(df["lat"], errors="coerce").fillna(35.0)
+    df["lon"] = pd.to_numeric(df["lon"], errors="coerce").fillna(139.0)
+    df["height"] = pd.to_numeric(df["height"], errors="coerce").fillna(0).astype(int)
+    df["range_nm"] = pd.to_numeric(df["range_nm"], errors="coerce").fillna(0.0)
+    df["score"] = pd.to_numeric(df["score"], errors="coerce").fillna(0).astype(int)
+    df["lens"] = df["lens"].fillna("不明")
+    df["visited"] = df["visited"].fillna("未訪問")
+    df["desc"] = df["desc"].fillna("（解説なし）")
     return df
 
 def save_all_data(df_to_save):
-    df_to_save.to_csv(CSV_FILE, index=False, encoding="utf-8-sig")
-
-def add_lighthouse_to_csv(new_data):
-    df_current = load_data()
-    df_updated = pd.concat([df_current, pd.DataFrame([new_data])], ignore_index=True)
-    save_all_data(df_updated)
+    # スプレッドシート全体を上書き更新
+    conn.update(data=df_to_save)
 
 df = load_data()
 
@@ -58,7 +47,6 @@ selected_region = st.sidebar.selectbox("地方を選択", regions)
 
 status_filter = st.sidebar.radio("訪問ステータスで絞り込み", ["すべて", "訪問済み", "未訪問"], horizontal=True)
 
-# ★追加：並び替え（ソート）機能
 sort_option = st.sidebar.selectbox(
     "リストの並び替え",
     ["登録順", "スコアが高い順", "スコアが低い順", "訪問済み優先", "未訪問優先"]
@@ -67,7 +55,6 @@ sort_option = st.sidebar.selectbox(
 search_term = st.sidebar.text_input("灯台名・都道府県・レンズで検索", "")
 show_range = st.sidebar.checkbox("光達距離（照射範囲）を表示", value=False)
 
-# 凡例表示
 st.sidebar.markdown("""
 **【ピンの色凡例】**
 - 🟩 **緑**: 訪問済み
@@ -110,21 +97,22 @@ with st.sidebar.expander("➕ 新しい灯台を追加する", expanded=False):
             if not new_name or not new_pref:
                 st.sidebar.error("灯台名と都道府県を入力してください。")
             else:
-                new_row = {
+                new_row = pd.DataFrame([{
                     "name": new_name,
                     "region": new_region,
                     "pref": new_pref,
                     "lat": new_lat,
                     "lon": new_lon,
-                    "height": new_height,
+                    "height": int(new_height),
                     "range_nm": new_range,
                     "lens": new_lens if new_lens else "不明",
                     "visited": new_visited,
                     "score": int(new_score),
                     "desc": new_desc if new_desc else "（解説なし）"
-                }
-                add_lighthouse_to_csv(new_row)
-                st.sidebar.success(f"「{new_name}」を追加しました！")
+                }])
+                df_updated = pd.concat([df, new_row], ignore_index=True)
+                save_all_data(df_updated)
+                st.sidebar.success(f"「{new_name}」をスプレッドシートに追加しました！")
                 st.rerun()
 
 # --- データの絞り込み・並び替え処理 ---
@@ -138,12 +126,11 @@ if status_filter != "すべて":
 
 if search_term:
     filtered_df = filtered_df[
-        filtered_df["name"].str.contains(search_term) | 
-        filtered_df["pref"].str.contains(search_term) |
-        filtered_df["lens"].str.contains(search_term)
+        filtered_df["name"].astype(str).str.contains(search_term) | 
+        filtered_df["pref"].astype(str).str.contains(search_term) |
+        filtered_df["lens"].astype(str).str.contains(search_term)
     ]
 
-# ★並び替えロジック
 if sort_option == "スコアが高い順":
     filtered_df = filtered_df.sort_values(by="score", ascending=False)
 elif sort_option == "スコアが低い順":
@@ -207,10 +194,9 @@ with col1:
     st_folium(m, width="100%", height=600)
 
 with col2:
-    st.subheader("📋 編集・並び替え結果")
-    st.caption("「ステータス」と「スコア」を直接変更して保存できます。")
+    st.subheader("📋 編集・クラウド同期")
+    st.caption("変更して保存すると、Googleスプレッドシートに即時反映されます。")
 
-    # ★ 編集可能テーブル（ステータス＆スコアの両方を編集可能）
     edited_df = st.data_editor(
         filtered_df[["name", "visited", "score", "pref"]],
         column_config={
@@ -235,13 +221,11 @@ with col2:
         key="status_score_editor"
     )
 
-    # ★ 変更保存ボタン
-    if st.button("💾 変更を保存する", use_container_width=True, type="primary"):
-        # 編集後のデータを元のデータフレーム(df)に反映
+    if st.button("💾 クラウドに保存する", use_container_width=True, type="primary"):
         for idx, row in edited_df.iterrows():
             df.loc[idx, "visited"] = row["visited"]
             df.loc[idx, "score"] = int(row["score"])
         
         save_all_data(df)
-        st.success("ステータスとスコアを更新しました！")
+        st.success("Googleスプレッドシートに保存しました！")
         st.rerun()
