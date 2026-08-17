@@ -1,5 +1,5 @@
 streamlit
+folium
 st-gsheets-connection
 pandas
 gspread
-folium
